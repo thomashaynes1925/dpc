@@ -35,7 +35,7 @@ def extract_regs(df, col):
             regs.add(m)
     return sorted(regs)
 
-# Site checker using regex on HTML
+# Site checker for AirTeamImages
 
 def search_airteam(reg, timeout=10):
     base = "https://www.airteamimages.com"
@@ -46,77 +46,62 @@ def search_airteam(reg, timeout=10):
     except:
         return False, ''
     html = resp.text
-    # look for <img ... class="... h-auto ... max-h-[155px] ...">
+    # Look for thumbnail classes in HTML
     if re.search(r'<img[^>]+class="[^"]*h-auto[^"]*max-h-\[155px\][^"]*"', html):
         return True, search_url
     return False, ''
 
-# Streamlit UI
-
+# Streamlit app
 st.title("Deliveries Photo Checker")
 
 # File uploader
-uploaded = st.file_uploader("Upload your file (.xlsx, .csv, .txt)")
+uploaded = st.file_uploader("Upload a CSV (.csv) or text (.txt) file containing registrations")
 if not uploaded:
+    st.info("Please upload a CSV or TXT file. For Excel files, save as CSV and re-upload.")
     st.stop()
 
-# Determine file type
+# Determine file extension
 ext = uploaded.name.split('.')[-1].lower()
 
-# Advanced settings in expander
+if ext == 'txt':
+    content = uploaded.getvalue().decode('utf-8').splitlines()
+    regs = sorted({line.strip() for line in content if line.strip()})
+elif ext == 'csv':
+    df = pd.read_csv(uploaded, dtype=str, header=0)
+    # Ask user to specify column name
+    col_name = st.text_input("Column name containing registrations", value=df.columns[0])
+    if col_name not in df.columns:
+        st.error(f"Column '{col_name}' not found in CSV.")
+        st.stop()
+    regs = extract_regs(df, col_name)
+else:
+    st.error("Unsupported file type. Please upload CSV or TXT only.")
+    st.stop()
+
+# Advanced settings
 with st.expander("Advanced Settings", expanded=False):
-    if ext in ['xlsx', 'xls', 'csv']:
-        sheet = st.text_input("Sheet name", value="ExportedData")
-        col_input = st.text_input("Column name or 1-based index", value="1")
-    else:
-        sheet = None
-        col_input = None
     workers = st.slider("Parallel workers", 1, 20, 10)
     timeout = st.slider("Request timeout (seconds)", 5, 60, 10)
 
-# Network selection
-st.markdown("**Select networks to check:**")
-check_ati = st.checkbox("AirTeamImages", value=True)
-
-# Run checks
+# Run button
 if st.button("Run Checks"):
-    # Extract registrations
-    if ext == 'txt':
-        text_lines = uploaded.getvalue().decode('utf-8').splitlines()
-        regs = sorted({line.strip() for line in text_lines if line.strip()})
-    else:
-        if ext in ['xlsx', 'xls']:
-            df = pd.read_excel(uploaded, sheet_name=sheet, header=0)
-        else:
-            df = pd.read_csv(uploaded, header=0)
-        col = int(col_input) - 1 if col_input and col_input.isdigit() else col_input
-        regs = extract_regs(df, col)
-
     st.write(f"Found {len(regs)} registrations. Starting checks...")
-
     progress = st.progress(0)
     results = []
 
-    # Define check function
     def check(reg):
-        entry = {'Registration': reg}
-        if check_ati:
-            ok, link = search_airteam(reg, timeout)
-            entry['AirTeamImages'] = ok
-            entry['ATI_Link'] = link
-        return entry
+        ok, link = search_airteam(reg, timeout)
+        return {'Registration': reg, 'AirTeamImages': ok, 'Link': link}
 
-    # Run in parallel
     with ThreadPoolExecutor(max_workers=workers) as executor:
         for i, entry in enumerate(executor.map(check, regs)):
             results.append(entry)
             progress.progress((i + 1) / len(regs))
 
-    # Display results
     df_out = pd.DataFrame(results)
     st.dataframe(df_out)
 
-    # Prepare Excel download
+    # Prepare download
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         df_out.to_excel(writer, index=False, sheet_name='Results')
@@ -124,15 +109,12 @@ if st.button("Run Checks"):
         worksheet = writer.sheets['Results']
         green_fmt = workbook.add_format({'bg_color': '#C6EFCE'})
         url_fmt = workbook.add_format({'font_color': 'blue', 'underline': True})
-
-        if check_ati:
-            worksheet.conditional_format(f'B2:B{len(df_out)+1}', {
-                'type': 'cell', 'criteria': '==', 'value': True, 'format': green_fmt
-            })
-            for row_idx, link in enumerate(df_out['ATI_Link'], start=1):
-                if link:
-                    worksheet.write_url(row_idx, 2, link, url_fmt, 'View ATI')
-
+        worksheet.conditional_format(f'B2:B{len(df_out)+1}', {
+            'type': 'cell', 'criteria': '==', 'value': True, 'format': green_fmt
+        })
+        for row_idx, link in enumerate(df_out['Link'], start=1):
+            if link:
+                worksheet.write_url(row_idx, 2, link, url_fmt, 'View')
     output.seek(0)
     st.download_button(
         "Download Results as Excel",
