@@ -1,10 +1,23 @@
+import sys
+import subprocess
+
+# Auto-install BeautifulSoup if missing
+
+def _install(pkg):
+    subprocess.check_call([sys.executable, "-m", "pip", "install", pkg], stdout=subprocess.DEVNULL)
+
+try:
+    from bs4 import BeautifulSoup
+except ImportError:
+    _install("beautifulsoup4")
+    from bs4 import BeautifulSoup
+
 import streamlit as st
 import pandas as pd
 import re
 import io
 from urllib.parse import quote_plus, urljoin
 import requests
-from bs4 import BeautifulSoup
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from concurrent.futures import ThreadPoolExecutor
@@ -36,7 +49,7 @@ def extract_regs(df, col):
             regs.add(m)
     return sorted(regs)
 
-# Site checkers
+# Site checker for AirTeamImages
 
 def search_airteam(reg, timeout=10):
     base = "https://www.airteamimages.com"
@@ -56,17 +69,18 @@ def search_airteam(reg, timeout=10):
     return False, ''
 
 # Streamlit UI
+
 st.title("Deliveries Photo Checker")
 
-# Upload
+# File uploader
 uploaded = st.file_uploader("Upload your file (.xlsx, .csv, .txt)")
 if not uploaded:
     st.stop()
 
-# File type detection
+# Determine file type
 ext = uploaded.name.split('.')[-1].lower()
 
-# Advanced settings
+# Advanced settings in expander
 with st.expander("Advanced Settings", expanded=False):
     if ext in ['xlsx', 'xls', 'csv']:
         sheet = st.text_input("Sheet name", value="ExportedData")
@@ -82,7 +96,7 @@ st.markdown("**Select networks to check:**")
 check_ati = st.checkbox("AirTeamImages", value=True)
 check_v1 = st.checkbox("V1Images", value=False)
 
-# Run button
+# Run checks
 if st.button("Run Checks"):
     # Extract registrations
     if ext == 'txt':
@@ -90,9 +104,9 @@ if st.button("Run Checks"):
         regs = sorted({line.strip() for line in text_lines if line.strip()})
     else:
         if ext in ['xlsx', 'xls']:
-            df = pd.read_excel(uploaded, sheet_name=sheet)
+            df = pd.read_excel(uploaded, sheet_name=sheet, header=0)
         else:
-            df = pd.read_csv(uploaded)
+            df = pd.read_csv(uploaded, header=0)
         col = int(col_input) - 1 if col_input and col_input.isdigit() else col_input
         regs = extract_regs(df, col)
 
@@ -101,7 +115,7 @@ if st.button("Run Checks"):
     progress = st.progress(0)
     results = []
 
-    # Define check function based on selection
+    # Define check function
     def check(reg):
         entry = {'Registration': reg}
         if check_ati:
@@ -109,22 +123,21 @@ if st.button("Run Checks"):
             entry['AirTeamImages'] = ok
             entry['ATI_Link'] = link
         if check_v1:
-            # Placeholder for V1Images search if added
             entry['V1Images'] = False
             entry['V1_Link'] = ''
         return entry
 
-    # Run in parallel
+    # Parallel execution
     with ThreadPoolExecutor(max_workers=workers) as executor:
         for i, entry in enumerate(executor.map(check, regs)):
             results.append(entry)
             progress.progress((i + 1) / len(regs))
 
-    # Display and prepare download
+    # Display results
     df_out = pd.DataFrame(results)
     st.dataframe(df_out)
 
-    # Write Excel
+    # Prepare Excel download
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         df_out.to_excel(writer, index=False, sheet_name='Results')
