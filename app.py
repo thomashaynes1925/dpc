@@ -1,22 +1,8 @@
-import sys
-import subprocess
-
-# Auto-install BeautifulSoup if missing
-
-def _install(pkg):
-    subprocess.check_call([sys.executable, "-m", "pip", "install", pkg], stdout=subprocess.DEVNULL)
-
-try:
-    from bs4 import BeautifulSoup
-except ImportError:
-    _install("beautifulsoup4")
-    from bs4 import BeautifulSoup
-
 import streamlit as st
 import pandas as pd
 import re
 import io
-from urllib.parse import quote_plus, urljoin
+from urllib.parse import quote_plus
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -49,7 +35,7 @@ def extract_regs(df, col):
             regs.add(m)
     return sorted(regs)
 
-# Site checker for AirTeamImages
+# Site checker using regex on HTML
 
 def search_airteam(reg, timeout=10):
     base = "https://www.airteamimages.com"
@@ -59,13 +45,10 @@ def search_airteam(reg, timeout=10):
         resp.raise_for_status()
     except:
         return False, ''
-    soup = BeautifulSoup(resp.text, 'html.parser')
-    for img in soup.find_all('img'):
-        classes = set(img.get('class', []))
-        if {'h-auto', 'max-h-[155px]'}.issubset(classes):
-            parent = img.find_parent('a')
-            page = urljoin(base, parent['href']) if parent else search_url
-            return True, page
+    html = resp.text
+    # look for <img ... class="... h-auto ... max-h-[155px] ...">
+    if re.search(r'<img[^>]+class="[^"]*h-auto[^"]*max-h-\[155px\][^"]*"', html):
+        return True, search_url
     return False, ''
 
 # Streamlit UI
@@ -94,7 +77,6 @@ with st.expander("Advanced Settings", expanded=False):
 # Network selection
 st.markdown("**Select networks to check:**")
 check_ati = st.checkbox("AirTeamImages", value=True)
-check_v1 = st.checkbox("V1Images", value=False)
 
 # Run checks
 if st.button("Run Checks"):
@@ -122,12 +104,9 @@ if st.button("Run Checks"):
             ok, link = search_airteam(reg, timeout)
             entry['AirTeamImages'] = ok
             entry['ATI_Link'] = link
-        if check_v1:
-            entry['V1Images'] = False
-            entry['V1_Link'] = ''
         return entry
 
-    # Parallel execution
+    # Run in parallel
     with ThreadPoolExecutor(max_workers=workers) as executor:
         for i, entry in enumerate(executor.map(check, regs)):
             results.append(entry)
@@ -146,7 +125,6 @@ if st.button("Run Checks"):
         green_fmt = workbook.add_format({'bg_color': '#C6EFCE'})
         url_fmt = workbook.add_format({'font_color': 'blue', 'underline': True})
 
-        col_offset = 1
         if check_ati:
             worksheet.conditional_format(f'B2:B{len(df_out)+1}', {
                 'type': 'cell', 'criteria': '==', 'value': True, 'format': green_fmt
@@ -154,15 +132,6 @@ if st.button("Run Checks"):
             for row_idx, link in enumerate(df_out['ATI_Link'], start=1):
                 if link:
                     worksheet.write_url(row_idx, 2, link, url_fmt, 'View ATI')
-            col_offset += 2
-        if check_v1:
-            letter = chr(65 + col_offset)
-            worksheet.conditional_format(f'{letter}2:{letter}{len(df_out)+1}', {
-                'type': 'cell', 'criteria': '==', 'value': True, 'format': green_fmt
-            })
-            for row_idx, link in enumerate(df_out['V1_Link'], start=1):
-                if link:
-                    worksheet.write_url(row_idx, col_offset, link, url_fmt, 'View V1')
 
     output.seek(0)
     st.download_button(
