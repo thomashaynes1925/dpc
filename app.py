@@ -10,26 +10,24 @@ from urllib3.util.retry import Retry
 from concurrent.futures import ThreadPoolExecutor
 
 # --- Authentication via Streamlit secrets ---
-# --- Authentication via Streamlit secrets ---
 creds = st.secrets.get("credentials", {})
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 
-# Display login form when not authenticated
-if not st.session_state.authenticated:
-    st.title("Login to Deliveries Photo Checker")
-    with st.form(key="login_form"):
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
-        submitted = st.form_submit_button("Login")
-        if submitted:
+# Login form using a placeholder container
+login_container = st.container()
+with login_container:
+    if not st.session_state.authenticated:
+        st.title("Login to Deliveries Photo Checker")
+        username = st.text_input("Username", key="login_user")
+        password = st.text_input("Password", type="password", key="login_pwd")
+        if st.button("Login", key="login_btn"):
             hash_val = creds.get(username)
             if hash_val and bcrypt.checkpw(password.encode(), hash_val.encode()):
                 st.session_state.authenticated = True
+                login_container.empty()
             else:
                 st.error("Invalid username or password")
-    # Halt further rendering until authenticated
-    if not st.session_state.authenticated:
         st.stop()
 
 # --- Main App ---
