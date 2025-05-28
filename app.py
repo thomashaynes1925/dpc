@@ -14,21 +14,17 @@ creds = st.secrets.get("credentials", {})
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 
-# Login form using a placeholder container
-login_container = st.container()
-with login_container:
-    if not st.session_state.authenticated:
-        st.title("Login to Deliveries Photo Checker")
-        username = st.text_input("Username", key="login_user")
-        password = st.text_input("Password", type="password", key="login_pwd")
-        if st.button("Login", key="login_btn"):
-            hash_val = creds.get(username)
-            if hash_val and bcrypt.checkpw(password.encode(), hash_val.encode()):
-                st.session_state.authenticated = True
-                st.experimental_rerun()
-            else:
-                st.error("Invalid username or password")
-        st.stop()
+if not st.session_state.authenticated:
+    st.title("Login to Deliveries Photo Checker")
+    username = st.text_input("Username", key="login_user")
+    password = st.text_input("Password", type="password", key="login_pwd")
+    if st.button("Login", key="login_btn"):
+        hash_val = creds.get(username)
+        if hash_val and bcrypt.checkpw(password.encode(), hash_val.encode()):
+            st.session_state.authenticated = True
+        else:
+            st.error("Invalid username or password")
+    st.stop()
 
 # --- Main App ---
 
