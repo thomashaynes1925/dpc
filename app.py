@@ -47,14 +47,12 @@ def make_session():
     return session
 session = make_session()
 
-# Initialize headless Chrome for AIN using chromedriver-binary
-chrome_options = Options()
-chrome_options.add_argument("--headless")
-chrome_options.add_argument("--no-sandbox")
-chrome_options.add_argument("--disable-dev-shm-usage")
-# If using a custom Chrome binary, uncomment and adjust:
-# chrome_options.binary_location = "/usr/bin/google-chrome-stable"
-service = Service()  # uses chromedriver-binary
+# Initialize headless Chrome for AIN using webdriver_manager
+from webdriver_manager.chrome import ChromeDriverManager
+# explicitly point to the Chrome binary installed via RPM
+driver_binary = "/usr/bin/google-chrome-stable"
+chrome_options.binary_location = driver_binary
+service = Service(ChromeDriverManager().install())
 driver = webdriver.Chrome(service=service, options=chrome_options)
 # Ensure driver quits on exit
 atexit.register(lambda: driver.quit())
