@@ -18,7 +18,7 @@ creds = st.secrets.get("credentials", {})
 
 # --- Login Screen ---
 if not st.session_state.authenticated:
-    st.title("Login to Deliveries Photo Checker")
+    st.title("Login to Photo Checker")
     with st.form(key="login_form"):
         username = st.text_input("Username")
         password = st.text_input("Password", type="password")
@@ -33,7 +33,7 @@ if not st.session_state.authenticated:
 
 # --- Main App ---
 
-st.title("Deliveries Photo Checker")
+st.title("Photo Checker")
 
 # Create HTTP session with retries
 def make_session():
