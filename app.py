@@ -10,7 +10,6 @@ from urllib3.util.retry import Retry
 from concurrent.futures import ThreadPoolExecutor
 
 # --- Authentication via Streamlit secrets ---
-# Store bcrypt hashes in ~/.streamlit/secrets.toml under [credentials]
 creds = st.secrets.get("credentials", {})
 if 'authenticated' not in st.session_state:
     st.session_state.authenticated = False
@@ -26,13 +25,13 @@ if not st.session_state.authenticated:
             hash_val = creds.get(username)
             if hash_val and bcrypt.checkpw(password.encode(), hash_val.encode()):
                 st.session_state.authenticated = True
-                st.experimental_rerun()
             else:
                 st.error("Invalid username or password")
-    st.stop()
+    # If still not authenticated, stop here
+    if not st.session_state.authenticated:
+        st.stop()
 
 # --- Main App ---
-
 # Regex for registrations
 REG_PATTERN = re.compile(r"\b(?:[A-Z0-9]{1,3}-[A-Z0-9]{1,5}|N\d{1,5}[A-Z]?)\b")
 
@@ -45,7 +44,6 @@ def make_session():
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     return session
-
 session = make_session()
 
 # Extract registrations from DataFrame
@@ -96,18 +94,15 @@ ext = uploaded.name.split('.')[-1].lower()
 
 # Advanced settings
 with st.expander("Advanced Settings", expanded=False):
-    # Excel sheet & column inputs
     if ext in ['xls', 'xlsx']:
         sheet = st.text_input("Excel sheet name", value="ExportedData")
         col_input = st.text_input("Excel column (name or 1-based index)", value="1")
-    # CSV column input
     elif ext == 'csv':
         df_temp = pd.read_csv(uploaded, nrows=0)
         default_col = df_temp.columns[0]
         col_input = st.text_input("CSV column name", value=default_col)
     else:
         col_input = None
-    # Workers & timeout
     workers = st.slider("Parallel workers", 1, 20, 10)
     timeout = st.slider("Request timeout (seconds)", 5, 60, 10)
 
@@ -135,7 +130,6 @@ def load_regs():
             st.stop()
         col_idx = int(col_input) - 1 if col_input.isdigit() else col_input
         return extract_regs(df, col_idx)
-
 regs = load_regs()
 
 # Run checks
@@ -166,7 +160,6 @@ if st.button("Run Checks"):
     df_out = pd.DataFrame(results)[['Registration', 'AirTeamImages', 'ATI_Link', 'V1Images', 'V1_Link']]
     st.dataframe(df_out)
 
-    # Prepare download
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
         df_out.to_excel(writer, index=False, sheet_name='Results')
@@ -174,12 +167,10 @@ if st.button("Run Checks"):
         ws = writer.sheets['Results']
         green = wb.add_format({'bg_color':'#C6EFCE'})
         link_fmt = wb.add_format({'font_color':'blue', 'underline':True})
-        # Highlight and link ATI
         if check_ati:
             ws.conditional_format(f'B2:B{len(df_out)+1}', {'type':'cell', 'criteria':'==', 'value':True, 'format':green})
             for r, link in enumerate(df_out['ATI_Link'], start=1):
                 if link: ws.write_url(r, 2, link, link_fmt, 'View ATI')
-        # Highlight and link V1
         if check_v1:
             ws.conditional_format(f'D2:D{len(df_out)+1}', {'type':'cell', 'criteria':'==', 'value':True, 'format':green})
             for r, link in enumerate(df_out['V1_Link'], start=1):
