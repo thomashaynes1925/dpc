@@ -25,11 +25,11 @@ if not st.session_state.authenticated:
             hash_val = creds.get(username)
             if hash_val and bcrypt.checkpw(password.encode(), hash_val.encode()):
                 st.session_state.authenticated = True
+                st.experimental_rerun()
             else:
                 st.error("Invalid username or password")
-    # If still not authenticated, stop here
-    if not st.session_state.authenticated:
-        st.stop()
+    # If form not submitted or login failed, stop app
+    st.stop()
 
 # --- Main App ---
 # Regex for registrations
