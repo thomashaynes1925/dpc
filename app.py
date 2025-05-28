@@ -51,11 +51,14 @@ session = make_session()
 from webdriver_manager.chrome import ChromeDriverManager
 # Configure Chrome options
 chrome_options = Options()
-chrome_options.add_argument("--headless")
+chrome_options.add_argument("--headless=new")  # Use new headless mode
 chrome_options.add_argument("--no-sandbox")
 chrome_options.add_argument("--disable-dev-shm-usage")
-# explicitly point to the Chrome binary installed via RPM
-chrome_options.binary_location = "/usr/bin/google-chrome-stable"
+chrome_options.add_argument("--disable-gpu")
+chrome_options.add_argument("--disable-software-rasterizer")
+chrome_options.add_argument("--remote-debugging-port=9222")
+# explicitly point to Chrome binary if needed
+# chrome_options.binary_location = "/usr/bin/google-chrome-stable"
 # Download and start the matching ChromeDriver
 service = Service(ChromeDriverManager().install())
 driver = webdriver.Chrome(service=service, options=chrome_options)
