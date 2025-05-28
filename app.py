@@ -25,12 +25,12 @@ if not st.session_state.authenticated:
         password = st.text_input("Password", type="password")
         submitted = st.form_submit_button("Login")
         if submitted:
-            hash_val = creds.get(username)
-            if hash_val and bcrypt.checkpw(password.encode(), hash_val.encode()):
-                st.session_state.authenticated = True
-                st.success(f"Welcome, {username}!")
-            else:
-                st.error("Invalid username or password")
+        hash_val = creds.get(username)
+        if hash_val and bcrypt.checkpw(password.encode(), hash_val.encode()):
+            st.session_state.authenticated = True
+            st.experimental_rerun()
+        else:
+            st.error("Invalid username or password")("Invalid username or password")
     # Stop execution until authenticated
     if not st.session_state.authenticated:
         st.stop()
