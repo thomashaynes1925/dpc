@@ -14,17 +14,22 @@ creds = st.secrets.get("credentials", {})
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 
+# Show login form until authenticated
 if not st.session_state.authenticated:
     st.title("Login to Deliveries Photo Checker")
-    username = st.text_input("Username", key="login_user")
-    password = st.text_input("Password", type="password", key="login_pwd")
-    if st.button("Login", key="login_btn"):
-        hash_val = creds.get(username)
-        if hash_val and bcrypt.checkpw(password.encode(), hash_val.encode()):
-            st.session_state.authenticated = True
-        else:
-            st.error("Invalid username or password")
-    st.stop()
+    with st.form(key="login_form"):
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Login")
+        if submitted:
+            hash_val = creds.get(username)
+            if hash_val and bcrypt.checkpw(password.encode(), hash_val.encode()):
+                st.session_state.authenticated = True
+            else:
+                st.error("Invalid username or password")
+    # Prevent main app from rendering until authenticated
+    if not st.session_state.authenticated:
+        st.stop()
 
 # --- Main App ---
 
