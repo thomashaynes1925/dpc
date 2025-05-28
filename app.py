@@ -2,12 +2,36 @@ import streamlit as st
 import pandas as pd
 import re
 import io
+import bcrypt
 from urllib.parse import quote_plus, urljoin
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from concurrent.futures import ThreadPoolExecutor
 
+# --- Authentication via Streamlit secrets ---
+# In ~/.streamlit/secrets.toml:
+# [credentials]
+# user1 = "<bcrypt-hash>"
+# user2 = "<bcrypt-hash>"
+creds = st.secrets.get("credentials", {})
+
+if 'authenticated' not in st.session_state:
+    st.session_state.authenticated = False
+
+if not st.session_state.authenticated:
+    st.title("Login")
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
+    if st.button("Login"):
+        if username in creds and bcrypt.checkpw(password.encode(), creds[username].encode()):
+            st.session_state.authenticated = True
+            st.experimental_rerun()
+        else:
+            st.error("Invalid username or password")
+    st.stop()
+
+# --- Main App ---
 # Regex for registrations
 REG_PATTERN = re.compile(r"\b(?:[A-Z0-9]{1,3}-[A-Z0-9]{1,5}|N\d{1,5}[A-Z]?)\b")
 
@@ -65,7 +89,6 @@ def search_v1(reg, timeout=10):
     return False, ''
 
 # Streamlit UI
-
 st.title("Deliveries Photo Checker")
 
 uploaded = st.file_uploader("Upload file (.xls, .xlsx, .csv, .txt)")
@@ -119,7 +142,7 @@ if st.button("Run Checks"):
     progress = st.progress(0)
     results = []
 
-    def check(reg):
+    def check_entry(reg):
         entry = {'Registration': reg,
                  'AirTeamImages': False, 'ATI_Link': '',
                  'V1Images': False, 'V1_Link': ''}
@@ -134,8 +157,8 @@ if st.button("Run Checks"):
         return entry
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        for i, entry in enumerate(executor.map(check, regs)):
-            results.append(entry)
+        for i, ent in enumerate(executor.map(check_entry, regs)):
+            results.append(ent)
             progress.progress((i + 1) / len(regs))
 
     df_out = pd.DataFrame(results)[['Registration',
