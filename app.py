@@ -57,7 +57,6 @@ def search_v1(reg, timeout=10):
         resp.raise_for_status()
     except:
         return False, ''
-    # detect direct redirect
     final = resp.url
     if final.rstrip('/') != search_url.rstrip('/'):
         return True, final
@@ -67,13 +66,8 @@ def search_v1(reg, timeout=10):
 
 # Streamlit UI
 
-# Display logo
-logo_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/1/1e/Airliner_World_logo.svg/2560px-Airliner_World_logo.svg.png"
-st.image(logo_url, width=200)
-
 st.title("Deliveries Photo Checker")
 
-# File uploader
 uploaded = st.file_uploader("Upload file (.xls, .xlsx, .csv, .txt)")
 if not uploaded:
     st.stop()
@@ -116,7 +110,7 @@ else:
     except Exception as e:
         st.error(f"Failed to read Excel: {e}")
         st.stop()
-    col_idx = int(col_input) - 1 if col_input and col_input.isdigit() else col_input
+    col_idx = int(col_input) - 1 if col_input.isdigit() else col_input
     regs = extract_regs(df, col_idx)
 
 # Run checks
