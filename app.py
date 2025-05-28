@@ -12,19 +12,28 @@ from concurrent.futures import ThreadPoolExecutor
 # --- Authentication via Streamlit secrets ---
 # Store bcrypt hashes in ~/.streamlit/secrets.toml under [credentials]
 creds = st.secrets.get("credentials", {})
+
+# Initialize auth flag
 if 'authenticated' not in st.session_state:
     st.session_state.authenticated = False
 
+# Login form
 if not st.session_state.authenticated:
-    st.title("Login")
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
-    if st.button("Login"):
-        if username in creds and bcrypt.checkpw(password.encode(), creds[username].encode()):
-            st.session_state.authenticated = True
-        else:
-            st.error("Invalid username or password")
-    st.stop()
+    st.title("Login to Deliveries Photo Checker")
+    with st.form("login_form"):
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Login")
+        if submitted:
+            hash_val = creds.get(username)
+            if hash_val and bcrypt.checkpw(password.encode(), hash_val.encode()):
+                st.session_state.authenticated = True
+                st.success(f"Welcome, {username}!")
+            else:
+                st.error("Invalid username or password")
+    # Stop execution until authenticated
+    if not st.session_state.authenticated:
+        st.stop()
 
 # --- Main App ---
 # Regex for registrations
