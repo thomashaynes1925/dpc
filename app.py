@@ -12,30 +12,27 @@ from concurrent.futures import ThreadPoolExecutor
 # --- Authentication via Streamlit secrets ---
 # Store bcrypt hashes in ~/.streamlit/secrets.toml under [credentials]
 creds = st.secrets.get("credentials", {})
-
-# Initialize auth flag
 if 'authenticated' not in st.session_state:
     st.session_state.authenticated = False
 
 # Login form
 if not st.session_state.authenticated:
     st.title("Login to Deliveries Photo Checker")
-    with st.form("login_form"):
+    with st.form(key="login_form"):
         username = st.text_input("Username")
         password = st.text_input("Password", type="password")
         submitted = st.form_submit_button("Login")
         if submitted:
-        hash_val = creds.get(username)
-        if hash_val and bcrypt.checkpw(password.encode(), hash_val.encode()):
-            st.session_state.authenticated = True
-            st.experimental_rerun()
-        else:
-            st.error("Invalid username or password")("Invalid username or password")
-    # Stop execution until authenticated
-    if not st.session_state.authenticated:
-        st.stop()
+            hash_val = creds.get(username)
+            if hash_val and bcrypt.checkpw(password.encode(), hash_val.encode()):
+                st.session_state.authenticated = True
+                st.experimental_rerun()
+            else:
+                st.error("Invalid username or password")
+    st.stop()
 
 # --- Main App ---
+
 # Regex for registrations
 REG_PATTERN = re.compile(r"\b(?:[A-Z0-9]{1,3}-[A-Z0-9]{1,5}|N\d{1,5}[A-Z]?)\b")
 
@@ -48,6 +45,7 @@ def make_session():
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     return session
+
 session = make_session()
 
 # Extract registrations from DataFrame
@@ -89,6 +87,8 @@ def search_v1(reg, timeout=10):
 
 # Streamlit UI
 st.title("Deliveries Photo Checker")
+
+# File uploader
 uploaded = st.file_uploader("Upload file (.xls, .xlsx, .csv, .txt)")
 if not uploaded:
     st.stop()
@@ -96,13 +96,18 @@ ext = uploaded.name.split('.')[-1].lower()
 
 # Advanced settings
 with st.expander("Advanced Settings", expanded=False):
+    # Excel sheet & column inputs
     if ext in ['xls', 'xlsx']:
         sheet = st.text_input("Excel sheet name", value="ExportedData")
         col_input = st.text_input("Excel column (name or 1-based index)", value="1")
+    # CSV column input
     elif ext == 'csv':
         df_temp = pd.read_csv(uploaded, nrows=0)
         default_col = df_temp.columns[0]
         col_input = st.text_input("CSV column name", value=default_col)
+    else:
+        col_input = None
+    # Workers & timeout
     workers = st.slider("Parallel workers", 1, 20, 10)
     timeout = st.slider("Request timeout (seconds)", 5, 60, 10)
 
@@ -169,10 +174,12 @@ if st.button("Run Checks"):
         ws = writer.sheets['Results']
         green = wb.add_format({'bg_color':'#C6EFCE'})
         link_fmt = wb.add_format({'font_color':'blue', 'underline':True})
+        # Highlight and link ATI
         if check_ati:
             ws.conditional_format(f'B2:B{len(df_out)+1}', {'type':'cell', 'criteria':'==', 'value':True, 'format':green})
             for r, link in enumerate(df_out['ATI_Link'], start=1):
                 if link: ws.write_url(r, 2, link, link_fmt, 'View ATI')
+        # Highlight and link V1
         if check_v1:
             ws.conditional_format(f'D2:D{len(df_out)+1}', {'type':'cell', 'criteria':'==', 'value':True, 'format':green})
             for r, link in enumerate(df_out['V1_Link'], start=1):
