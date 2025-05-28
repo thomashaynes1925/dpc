@@ -8,6 +8,11 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from concurrent.futures import ThreadPoolExecutor
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
 # --- Authentication via Streamlit secrets ---
 creds = st.secrets.get("credentials", {})
@@ -28,28 +33,31 @@ if not st.session_state.authenticated:
 # --- Main App ---
 st.title("Photo Checker")
 
-# Create HTTP session with retries
-def make_session():
-    session = requests.Session()
-    retry = Retry(total=3, backoff_factor=0.5,
-                  status_forcelist=[429,500,502,503,504])
-    adapter = HTTPAdapter(max_retries=retry)
-    session.mount("http://", adapter)
-    session.mount("https://", adapter)
-    return session
-session = make_session()
+# Initialize HTTP session
+session = requests.Session()
+retry = Retry(total=3, backoff_factor=0.5, status_forcelist=[429,500,502,503,504])
+adapter = HTTPAdapter(max_retries=retry)
+session.mount("http://", adapter)
+session.mount("https://", adapter)
 
-# Extract registrations
-REG_PATTERN = re.compile(r"\b(?:[A-Z0-9]{1,3}-[A-Z0-9]{1,5}|N\d{1,5}[A-Z]?)\b")
+# Initialize headless browser for AIN
+chrome_options = Options()
+chrome_options.add_argument("--headless")
+chrome_options.add_argument("--no-sandbox")
+chrome_options.add_argument("--disable-dev-shm-usage")
+driver = webdriver.Chrome(options=chrome_options)
+
 def extract_regs(df, col):
+    pattern = re.compile(r"\b(?:[A-Z0-9]{1,3}-[A-Z0-9]{1,5}|N\d{1,5}[A-Z]?)\b")
     regs = set()
     series = df.iloc[:, col] if isinstance(col, int) else df[col]
     for txt in series.astype(str):
-        for m in REG_PATTERN.findall(txt):
+        for m in pattern.findall(txt):
             regs.add(m)
     return sorted(regs)
 
 # Site 1: AirTeamImages
+
 def search_airteam(reg, timeout=10):
     url = f"https://www.airteamimages.com/search?q={quote_plus(reg)}&sort=id%2Cdesc"
     try:
@@ -57,38 +65,43 @@ def search_airteam(reg, timeout=10):
         r.raise_for_status()
     except:
         return False, ''
-    if re.search(r'<img[^>]+class="[^"]*h-auto[^"]*max-h-\[155px\][^"]*"', r.text):
-        return True, url
-    return False, ''
+    return (bool(re.search(r'<img[^>]+class="[^"]*h-auto[^"]*max-h-\[155px\][^"]*"', r.text)), url)
 
 # Site 2: V1Images
+
 def search_v1(reg, timeout=10):
-    base = "https://www.v1images.com"
-    url = f"{base}/?s={quote_plus(reg)}&post_type=product&orderby=date-DESC"
+    url = f"https://www.v1images.com/?s={quote_plus(reg)}&post_type=product&orderby=date-DESC"
     try:
         r = session.get(url, timeout=timeout)
         r.raise_for_status()
     except:
         return False, ''
     final = r.url
-    if final.rstrip('/') != url.rstrip('/') or re.search(r'<figure[^>]+class="[^"]*woocom-project[^"]*"', r.text):
-        return True, final
-    return False, ''
+    found = (final.rstrip('/') != url.rstrip('/')) or bool(re.search(r'<figure[^>]+class="[^"]*woocom-project[^"]*"', r.text))
+    return found, (final if found else '')
 
-# Site 3: Aviation Image Network
+# Site 3: Aviation Image Network via Selenium
+
 def search_ain(reg, timeout=10):
     url = f"https://www.aviationimagenetwork.com/search/?n=aviationimagenetwork&scope=node&scopeValue=cm8GDr&c=photos&q={quote_plus(reg)}"
     try:
-        r = session.get(url, timeout=timeout)
-        r.raise_for_status()
+        driver.get(url)
+        # wait for either photo thumbnails or no-results indicator
+        WebDriverWait(driver, timeout).until(
+            EC.any_of(
+                EC.presence_of_element_located((By.CSS_SELECTOR, 'img[src*="smugmug"]')),
+                EC.presence_of_element_located((By.CSS_SELECTOR, '.no-results'))
+            )
+        )
+        # detect smugmug thumbnails
+        thumbs = driver.find_elements(By.CSS_SELECTOR, 'img[src*="smugmug"]')
+        if thumbs:
+            return True, url
     except:
-        return False, ''
-    # if links to '/photos/' exist, assume results
-    if re.search(r'href="/photos/', r.text):
-        return True, url
+        pass
     return False, ''
 
-# File uploader
+# File upload
 uploaded = st.file_uploader("Upload file (.xls, .xlsx, .csv, .txt)")
 if not uploaded:
     st.info("Please upload a file to proceed.")
@@ -105,7 +118,7 @@ with st.expander("Advanced Settings", expanded=False):
         col_input = st.text_input("CSV column name", value=tmp.columns[0])
     else:
         col_input = None
-    workers = st.slider("Parallel workers", 1, 20, 10)
+    workers = st.slider("Parallel workers", 1, 5, 1)  # limit parallel
     timeout = st.slider("Request timeout (seconds)", 5, 60, 10)
 
 # Network selection
@@ -114,15 +127,12 @@ check_ati = st.checkbox("AirTeamImages", value=True)
 check_v1 = st.checkbox("V1Images", value=True)
 check_ain = st.checkbox("Aviation Image Network", value=False)
 
-# Load registrations
+# Load regs
 def load_regs():
-    if ext=='txt':
-        return sorted({l.strip() for l in uploaded.getvalue().decode().splitlines() if l.strip()})
+    if ext=='txt': return sorted({l.strip() for l in uploaded.getvalue().decode().splitlines() if l.strip()})
     if ext=='csv':
         df = pd.read_csv(uploaded, dtype=str)
-        if col_input not in df.columns:
-            st.error(f"Column '{col_input}' not found.")
-            st.stop()
+        if col_input not in df.columns: st.error(f"Column '{col_input}' not found."); st.stop()
         return extract_regs(df, col_input)
     df = pd.read_excel(uploaded, sheet_name=sheet, dtype=str)
     idx = int(col_input)-1 if col_input.isdigit() else col_input
@@ -131,28 +141,20 @@ regs = load_regs()
 
 # Run Checks
 if st.button("Run Checks"):
-    st.write(f"Checking {len(regs)} registrations...")
     progress = st.progress(0)
     results = []
     def check(reg):
-        entry = {'Registration':reg}
-        if check_ati:
-            ok,ln=search_airteam(reg, timeout)
-            entry['AirTeamImages']=ok; entry['ATI_Link']=ln
-        if check_v1:
-            ok,ln=search_v1(reg, timeout)
-            entry['V1Images']=ok; entry['V1_Link']=ln
-        if check_ain:
-            ok,ln=search_ain(reg, timeout)
-            entry['AIN']=ok; entry['AIN_Link']=ln
-        return entry
+        e={'Registration':reg}
+        if check_ati: ok,ln=search_airteam(reg, timeout); e['AirTeamImages']=ok; e['ATI_Link']=ln
+        if check_v1: ok,ln=search_v1(reg, timeout); e['V1Images']=ok; e['V1_Link']=ln
+        if check_ain: ok,ln=search_ain(reg, timeout); e['AIN']=ok; e['AIN_Link']=ln
+        return e
     with ThreadPoolExecutor(max_workers=workers) as ex:
         for i,res in enumerate(ex.map(check, regs)):
             results.append(res)
             progress.progress((i+1)/len(regs))
     df_out = pd.DataFrame(results)[['Registration','AirTeamImages','ATI_Link','V1Images','V1_Link','AIN','AIN_Link']]
     st.dataframe(df_out)
-    # Excel export
     buf=io.BytesIO()
     with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
         df_out.to_excel(writer, index=False, sheet_name='Results')
@@ -161,15 +163,19 @@ if st.button("Run Checks"):
         linkfmt=wb.add_format({'font_color':'blue','underline':True})
         if check_ati:
             ws.conditional_format(f'B2:B{len(df_out)+1}',{'type':'cell','criteria':'==','value':True,'format':green})
-            for r,link in enumerate(df_out['ATI_Link'],start=1):
+            for r, link in enumerate(df_out['ATI_Link'],start=1):
                 if link: ws.write_url(r,2,link,linkfmt,'View ATI')
         if check_v1:
             ws.conditional_format(f'D2:D{len(df_out)+1}',{'type':'cell','criteria':'==','value':True,'format':green})
-            for r,link in enumerate(df_out['V1_Link'],start=1):
+            for r, link in enumerate(df_out['V1_Link'],start=1):
                 if link: ws.write_url(r,4,link,linkfmt,'View V1')
         if check_ain:
             ws.conditional_format(f'F2:F{len(df_out)+1}',{'type':'cell','criteria':'==','value':True,'format':green})
-            for r,link in enumerate(df_out['AIN_Link'],start=1):
+            for r, link in enumerate(df_out['AIN_Link'],start=1):
                 if link: ws.write_url(r,6,link,linkfmt,'View AIN')
     buf.seek(0)
     st.download_button("Download Excel", data=buf, file_name="photo_availability.xlsx", mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+# Clean up driver on exit
+import atexit
+atexit.register(lambda: driver.quit())
