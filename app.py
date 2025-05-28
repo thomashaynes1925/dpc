@@ -10,9 +10,11 @@ from urllib3.util.retry import Retry
 from concurrent.futures import ThreadPoolExecutor
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+import chromedriver_binary  # Adds chromedriver to path
 import atexit
 
 # --- Authentication via Streamlit secrets ---
@@ -45,13 +47,15 @@ def make_session():
     return session
 session = make_session()
 
-# Initialize headless Chrome for AIN
+# Initialize headless Chrome for AIN using chromedriver-binary
 chrome_options = Options()
 chrome_options.add_argument("--headless")
 chrome_options.add_argument("--no-sandbox")
 chrome_options.add_argument("--disable-dev-shm-usage")
-chrome_options.binary_location = "/usr/bin/google-chrome-stable"
-driver = webdriver.Chrome(options=chrome_options)
+# If using a custom Chrome binary, uncomment and adjust:
+# chrome_options.binary_location = "/usr/bin/google-chrome-stable"
+service = Service()  # uses chromedriver-binary
+driver = webdriver.Chrome(service=service, options=chrome_options)
 # Ensure driver quits on exit
 atexit.register(lambda: driver.quit())
 
@@ -67,7 +71,6 @@ def extract_regs(df, col):
     return sorted(regs)
 
 # Site 1: AirTeamImages
-
 def search_airteam(reg, timeout=10):
     url = f"https://www.airteamimages.com/search?q={quote_plus(reg)}&sort=id%2Cdesc"
     try:
@@ -79,7 +82,6 @@ def search_airteam(reg, timeout=10):
     return found, (url if found else '')
 
 # Site 2: V1Images
-
 def search_v1(reg, timeout=10):
     url = f"https://www.v1images.com/?s={quote_plus(reg)}&post_type=product&orderby=date-DESC"
     try:
@@ -122,7 +124,7 @@ with st.expander("Advanced Settings", expanded=False):
     if ext in ['xls','xlsx']:
         sheet = st.text_input("Excel sheet name", value="ExportedData")
         col_input = st.text_input("Excel column (name or 1-based index)", value="1")
-    elif ext == 'csv':
+    elif ext=='csv':
         tmp = pd.read_csv(uploaded, nrows=0)
         col_input = st.text_input("CSV column name", value=tmp.columns[0])
     else:
@@ -171,35 +173,28 @@ if st.button("Run Checks"):
             entry['AIN'] = ok
             entry['AIN_Link'] = link
         return entry
-
     with ThreadPoolExecutor(max_workers=workers) as executor:
         for i, res in enumerate(executor.map(check_entry, regs)):
             results.append(res)
             progress.progress((i + 1) / len(regs))
-
     df_out = pd.DataFrame(results)[['Registration', 'AirTeamImages', 'ATI_Link', 'V1Images', 'V1_Link', 'AIN', 'AIN_Link']]
     st.dataframe(df_out)
-
-    # Prepare Excel export
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
         df_out.to_excel(writer, index=False, sheet_name='Results')
         wb, ws = writer.book, writer.sheets['Results']
         green_fmt = wb.add_format({'bg_color': '#C6EFCE'})
         link_fmt = wb.add_format({'font_color': 'blue', 'underline': True})
-        # Highlight and link ATI
         if check_ati:
             ws.conditional_format(f'B2:B{len(df_out)+1}', {'type': 'cell', 'criteria': '==', 'value': True, 'format': green_fmt})
             for r, link in enumerate(df_out['ATI_Link'], start=1):
                 if link:
                     ws.write_url(r, 2, link, link_fmt, 'View ATI')
-        # Highlight and link V1
         if check_v1:
             ws.conditional_format(f'D2:D{len(df_out)+1}', {'type': 'cell', 'criteria': '==', 'value': True, 'format': green_fmt})
             for r, link in enumerate(df_out['V1_Link'], start=1):
                 if link:
                     ws.write_url(r, 4, link, link_fmt, 'View V1')
-        # Highlight and link AIN
         if check_ain:
             ws.conditional_format(f'F2:F{len(df_out)+1}', {'type': 'cell', 'criteria': '==', 'value': True, 'format': green_fmt})
             for r, link in enumerate(df_out['AIN_Link'], start=1):
