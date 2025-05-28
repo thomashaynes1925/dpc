@@ -25,7 +25,7 @@ with login_container:
             hash_val = creds.get(username)
             if hash_val and bcrypt.checkpw(password.encode(), hash_val.encode()):
                 st.session_state.authenticated = True
-                login_container.empty()
+                st.experimental_rerun()
             else:
                 st.error("Invalid username or password")
         st.stop()
