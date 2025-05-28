@@ -17,19 +17,17 @@ if 'authenticated' not in st.session_state:
 # Login form
 if not st.session_state.authenticated:
     st.title("Login to Deliveries Photo Checker")
-    with st.form(key="login_form"):
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
-        submitted = st.form_submit_button("Login")
-        if submitted:
-            hash_val = creds.get(username)
-            if hash_val and bcrypt.checkpw(password.encode(), hash_val.encode()):
-                st.session_state.authenticated = True
-                st.experimental_rerun()
-            else:
-                st.error("Invalid username or password")
-    # If form not submitted or login failed, stop app
-    st.stop()
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
+    if st.button("Login"):
+        hash_val = creds.get(username)
+        if hash_val and bcrypt.checkpw(password.encode(), hash_val.encode()):
+            st.session_state.authenticated = True
+        else:
+            st.error("Invalid username or password")
+    # Prevent access until authenticated
+    if not st.session_state.authenticated:
+        st.stop()
 
 # --- Main App ---
 # Regex for registrations
