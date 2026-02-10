@@ -2,21 +2,26 @@ import streamlit as st
 import pandas as pd
 import re
 import io
+import time
+import random
 import bcrypt
+import threading
 from urllib.parse import quote_plus
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# Initialize authentication state
-if 'authenticated' not in st.session_state:
+# -----------------------------
+# App + Auth
+# -----------------------------
+st.set_page_config(page_title="Photo Checker", layout="wide")
+
+if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 
-# Load credentials from secrets
-creds = st.secrets.get("credentials", {})
+creds = st.secrets.get("credentials", {})  # expects { "username": "<bcrypt_hash_string>" }
 
-# --- Login Screen ---
 if not st.session_state.authenticated:
     st.title("Login to Photo Checker")
     with st.form(key="login_form"):
@@ -25,148 +30,354 @@ if not st.session_state.authenticated:
         submitted = st.form_submit_button("Login")
         if submitted:
             hash_val = creds.get(username)
-            if hash_val and bcrypt.checkpw(password.encode(), hash_val.encode()):
+            if hash_val and bcrypt.checkpw(password.encode("utf-8"), hash_val.encode("utf-8")):
                 st.session_state.authenticated = True
+                st.rerun()
             else:
                 st.error("Invalid username or password")
     st.stop()
 
-# --- Main App ---
-
 st.title("Photo Checker")
 
-# Create HTTP session with retries
-def make_session():
-    session = requests.Session()
-    retry = Retry(total=3, backoff_factor=0.5,
-                  status_forcelist=[429, 500, 502, 503, 504])
-    adapter = HTTPAdapter(max_retries=retry)
-    session.mount("http://", adapter)
-    session.mount("https://", adapter)
-    return session
-session = make_session()
+# -----------------------------
+# Networking (thread-safe sessions)
+# -----------------------------
+def make_session() -> requests.Session:
+    s = requests.Session()
+    retry = Retry(
+        total=3,
+        backoff_factor=0.5,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET"],
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=50, pool_maxsize=50)
+    s.mount("http://", adapter)
+    s.mount("https://", adapter)
 
-# Regex for registrations
+    # Browser-like headers help prevent “bot” responses / variant HTML
+    s.headers.update(
+        {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/121.0.0.0 Safari/537.36"
+            ),
+            "Accept-Language": "en-GB,en;q=0.9",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Connection": "keep-alive",
+        }
+    )
+    return s
+
+
+_thread_local = threading.local()
+
+
+def get_session() -> requests.Session:
+    if not hasattr(_thread_local, "session"):
+        _thread_local.session = make_session()
+    return _thread_local.session
+
+
+# -----------------------------
+# Registration parsing
+# -----------------------------
 REG_PATTERN = re.compile(r"\b(?:[A-Z0-9]{1,3}-[A-Z0-9]{1,5}|N\d{1,5}[A-Z]?)\b")
 
-def extract_regs(df, col):
+
+def extract_regs_from_text(text: str) -> list[str]:
+    if not text:
+        return []
+    matches = REG_PATTERN.findall(text.upper())
+    return sorted(set(matches))
+
+
+def extract_regs_from_df(df: pd.DataFrame, col) -> list[str]:
     regs = set()
     series = df.iloc[:, col] if isinstance(col, int) else df[col]
     for txt in series.astype(str):
-        for m in REG_PATTERN.findall(txt):
+        for m in REG_PATTERN.findall(str(txt).upper()):
             regs.add(m)
     return sorted(regs)
 
+
+# -----------------------------
 # Search functions
-def search_airteam(reg, timeout):
+# -----------------------------
+def _polite_delay(min_ms: int, max_ms: int):
+    # helps if a site gets grumpy with parallel requests
+    time.sleep(random.uniform(min_ms / 1000.0, max_ms / 1000.0))
+
+
+def search_airteam(reg: str, timeout_s: int, min_delay_ms: int, max_delay_ms: int):
+    """
+    Returns: (found: bool, link: str, debug_flag: str)
+    """
+    _polite_delay(min_delay_ms, max_delay_ms)
+    s = get_session()
     url = f"https://www.airteamimages.com/search?q={quote_plus(reg)}&sort=id%2Cdesc"
+
     try:
-        r = session.get(url, timeout=timeout)
-        r.raise_for_status()
-    except:
-        return False, ''
-    if re.search(r'<img[^>]+class="[^"]*h-auto[^"]*max-h-\[155px\][^"]*"', r.text):
-        return True, url
-    return False, ''
+        r = s.get(url, timeout=timeout_s)
+        html = r.text or ""
+    except Exception as e:
+        return False, "", f"ATI request error: {e}"
+
+    # Soft-block indicators (common on VPS/AWS IP space)
+    block_markers = ["captcha", "cloudflare", "access denied", "forbidden", "blocked", "verify you are human"]
+    if any(m in html.lower() for m in block_markers):
+        return False, "", "ATI possible block page"
+
+    # More stable than CSS classes: presence of Image ID blocks generally indicates results exist
+    if re.search(r"Image ID:\s*\d+", html, re.IGNORECASE):
+        return True, url, ""
+    return False, "", ""
 
 
-def search_v1(reg, timeout):
+def search_v1(reg: str, timeout_s: int, min_delay_ms: int, max_delay_ms: int):
+    """
+    Returns: (found: bool, link: str, debug_flag: str)
+    """
+    _polite_delay(min_delay_ms, max_delay_ms)
+    s = get_session()
     base = "https://www.v1images.com"
     url = f"{base}/?s={quote_plus(reg)}&post_type=product&orderby=date-DESC"
-    try:
-        r = session.get(url, timeout=timeout)
-        r.raise_for_status()
-    except:
-        return False, ''
-    final = r.url
-    if final.rstrip('/') != url.rstrip('/') or re.search(r'<figure[^>]+class="[^"]*woocom-project[^"]*"', r.text):
-        return True, final
-    return False, ''
 
-# File upload
-uploaded = st.file_uploader("Upload file (.xls, .xlsx, .csv, .txt)")
+    try:
+        r = s.get(url, timeout=timeout_s, allow_redirects=True)
+        html = r.text or ""
+        final = r.url
+    except Exception as e:
+        return False, "", f"V1 request error: {e}"
+
+    block_markers = ["captcha", "cloudflare", "access denied", "forbidden", "blocked", "verify you are human"]
+    if any(m in html.lower() for m in block_markers):
+        return False, "", "V1 possible block page"
+
+    # Heuristic: redirect to product page or presence of product grid/figure
+    if final.rstrip("/") != url.rstrip("/") or re.search(r'post_type=product|woocommerce|product', html, re.IGNORECASE):
+        # Some searches keep you on same URL even when there are results; check for common product markup
+        if re.search(r'product|woocommerce|add to cart|post_type=product|class="product', html, re.IGNORECASE):
+            return True, final, ""
+    return False, "", ""
+
+
+# -----------------------------
+# Upload + settings
+# -----------------------------
+uploaded = st.file_uploader("Upload file (.xls, .xlsx, .csv, .txt)", type=["xls", "xlsx", "csv", "txt"])
 if not uploaded:
     st.info("Please upload a file to proceed.")
     st.stop()
-ext = uploaded.name.split('.')[-1].lower()
 
-# Advanced Settings
+ext = uploaded.name.split(".")[-1].lower()
+
 with st.expander("Advanced Settings", expanded=False):
-    if ext in ['xls', 'xlsx']:
+    if ext in ["xls", "xlsx"]:
         sheet = st.text_input("Excel sheet name", "ExportedData")
         col_input = st.text_input("Excel column (name or 1-based index)", "1")
-    elif ext == 'csv':
+    elif ext == "csv":
+        uploaded.seek(0)
         df_temp = pd.read_csv(uploaded, nrows=0)
-        col_input = st.text_input("CSV column name", df_temp.columns[0])
+        uploaded.seek(0)
+        default_col = df_temp.columns[0] if len(df_temp.columns) else ""
+        col_input = st.text_input("CSV column name", default_col)
+        sheet = None
     else:
+        sheet = None
         col_input = None
-    workers = st.slider("Parallel workers", 1, 20, 10)
-    timeout = st.slider("Request timeout (seconds)", 5, 60, 10)
 
-# Network selection
+    workers = st.slider("Parallel workers", 1, 20, 8)
+    timeout_s = st.slider("Request timeout (seconds)", 5, 60, 12)
+
+    st.markdown("**Rate limiting (helps from AWS / avoids soft-blocks):**")
+    min_delay_ms = st.slider("Minimum delay per request (ms)", 0, 1000, 50, step=25)
+    max_delay_ms = st.slider("Maximum delay per request (ms)", 0, 2000, 200, step=25)
+
 st.markdown("**Select networks to check:**")
 check_ati = st.checkbox("AirTeamImages", value=True)
 check_v1 = st.checkbox("V1Images", value=True)
 
-# Load registrations
-def load_regs():
-    if ext == 'txt':
-        lines = uploaded.getvalue().decode('utf-8').splitlines()
-        return sorted({l.strip() for l in lines if l.strip()})
-    elif ext == 'csv':
+if not (check_ati or check_v1):
+    st.warning("Select at least one network to check.")
+    st.stop()
+
+
+def load_regs() -> list[str]:
+    uploaded.seek(0)
+    if ext == "txt":
+        text = uploaded.getvalue().decode("utf-8", errors="ignore")
+        return extract_regs_from_text(text)
+
+    if ext == "csv":
         df = pd.read_csv(uploaded, dtype=str)
-        if col_input not in df.columns:
-            st.error(f"Column '{col_input}' not found.")
+        if not col_input or col_input not in df.columns:
+            st.error(f"Column '{col_input}' not found in CSV.")
             st.stop()
-        return extract_regs(df, col_input)
-    else:
-        try:
-            df = pd.read_excel(uploaded, sheet_name=sheet, dtype=str)
-        except Exception as e:
-            st.error(f"Failed to read Excel: {e}")
-            st.stop()
-        col_idx = int(col_input) - 1 if col_input.isdigit() else col_input
-        return extract_regs(df, col_idx)
+        return extract_regs_from_df(df, col_input)
+
+    # Excel
+    try:
+        df = pd.read_excel(uploaded, sheet_name=sheet, dtype=str)
+    except Exception as e:
+        st.error(f"Failed to read Excel: {e}")
+        st.stop()
+
+    if not col_input:
+        st.error("Please specify an Excel column (name or 1-based index).")
+        st.stop()
+
+    col_idx = int(col_input) - 1 if str(col_input).strip().isdigit() else col_input
+    try:
+        return extract_regs_from_df(df, col_idx)
+    except Exception as e:
+        st.error(f"Failed to extract registrations from the chosen column: {e}")
+        st.stop()
+
+
 regs = load_regs()
+if not regs:
+    st.warning("No registrations were found in the uploaded file.")
+    st.stop()
 
-# Run Checks
+st.success(f"Loaded {len(regs)} registrations.")
+
+# Optional quick debug
+with st.expander("Debug tools", expanded=False):
+    test_reg = st.text_input("Test registration", "A7-BHY")
+    if st.button("Test ATI/V1 from this server"):
+        cols = st.columns(2)
+        if check_ati:
+            found, link, dbg = search_airteam(test_reg, timeout_s, min_delay_ms, max_delay_ms)
+            with cols[0]:
+                st.subheader("AirTeamImages")
+                st.write("Found:", found)
+                st.write("Link:", link if link else "(none)")
+                st.write("Note:", dbg if dbg else "(none)")
+        if check_v1:
+            found2, link2, dbg2 = search_v1(test_reg, timeout_s, min_delay_ms, max_delay_ms)
+            with cols[1]:
+                st.subheader("V1Images")
+                st.write("Found:", found2)
+                st.write("Link:", link2 if link2 else "(none)")
+                st.write("Note:", dbg2 if dbg2 else "(none)")
+
+# -----------------------------
+# Run checks
+# -----------------------------
 if st.button("Run Checks"):
-    st.write(f"Found {len(regs)} registrations. Starting checks...")
-    progress = st.progress(0)
+    st.write(f"Starting checks for {len(regs)} registrations…")
+    progress = st.progress(0.0)
+    status = st.empty()
+
     results = []
+    debug_notes = []
 
-    def check_entry(reg):
-        entry = {'Registration': reg}
+    def check_entry(reg: str):
+        entry = {"Registration": reg}
+        notes = []
+
         if check_ati:
-            ok, link = search_airteam(reg, timeout)
-            entry['AirTeamImages'] = ok; entry['ATI_Link'] = link
-        if check_v1:
-            ok2, link2 = search_v1(reg, timeout)
-            entry['V1Images'] = ok2; entry['V1_Link'] = link2
-        return entry
+            ok, link, dbg = search_airteam(reg, timeout_s, min_delay_ms, max_delay_ms)
+            entry["AirTeamImages"] = ok
+            entry["ATI_Link"] = link
+            if dbg:
+                notes.append(f"ATI: {dbg}")
 
+        if check_v1:
+            ok2, link2, dbg2 = search_v1(reg, timeout_s, min_delay_ms, max_delay_ms)
+            entry["V1Images"] = ok2
+            entry["V1_Link"] = link2
+            if dbg2:
+                notes.append(f"V1: {dbg2}")
+
+        return entry, (reg, "; ".join(notes) if notes else "")
+
+    # Use as_completed so progress updates smoothly
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        for i, res in enumerate(executor.map(check_entry, regs)):
-            results.append(res)
-            progress.progress((i+1)/len(regs))
+        futures = [executor.submit(check_entry, reg) for reg in regs]
+        total = len(futures)
 
-    df_out = pd.DataFrame(results)[['Registration','AirTeamImages','ATI_Link','V1Images','V1_Link']]
-    st.dataframe(df_out)
+        for i, fut in enumerate(as_completed(futures), start=1):
+            entry, note = fut.result()
+            results.append(entry)
+            if note[1]:
+                debug_notes.append(note)
 
-    # Prepare Excel
+            progress.progress(i / total)
+            if i % 10 == 0 or i == total:
+                status.write(f"Checked {i}/{total}")
+
+    # Build output columns dynamically (prevents KeyError if only one network selected)
+    cols = ["Registration"]
+    if check_ati:
+        cols += ["AirTeamImages", "ATI_Link"]
+    if check_v1:
+        cols += ["V1Images", "V1_Link"]
+
+    df_out = pd.DataFrame(results)
+    df_out = df_out[cols].sort_values("Registration").reset_index(drop=True)
+
+    st.subheader("Results")
+    st.dataframe(df_out, use_container_width=True)
+
+    if debug_notes:
+        with st.expander("Request notes (possible blocks/errors)", expanded=False):
+            st.write(pd.DataFrame(debug_notes, columns=["Registration", "Note"]))
+
+    # -----------------------------
+    # Write Excel with formatting + links
+    # -----------------------------
     buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-        df_out.to_excel(writer, index=False, sheet_name='Results')
-        wb = writer.book; ws = writer.sheets['Results']
-        green = wb.add_format({'bg_color':'#C6EFCE'})
-        link_fmt = wb.add_format({'font_color':'blue','underline':True})
-        if check_ati:
-            ws.conditional_format(f'B2:B{len(df_out)+1}', {'type':'cell','criteria':'==','value':True,'format':green})
-            for r, link in enumerate(df_out['ATI_Link'], start=1):
-                if link: ws.write_url(r,2,link,link_fmt,'View ATI')
-        if check_v1:
-            ws.conditional_format(f'D2:D{len(df_out)+1}', {'type':'cell','criteria':'==','value':True,'format':green})
-            for r, link in enumerate(df_out['V1_Link'], start=1):
-                if link: ws.write_url(r,4,link,link_fmt,'View V1')
+    with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+        df_out.to_excel(writer, index=False, sheet_name="Results")
+        wb = writer.book
+        ws = writer.sheets["Results"]
+
+        green = wb.add_format({"bg_color": "#C6EFCE"})
+        link_fmt = wb.add_format({"font_color": "blue", "underline": True})
+
+        # Determine column indices by header
+        header_to_col = {name: idx for idx, name in enumerate(df_out.columns)}
+
+        if check_ati and "AirTeamImages" in header_to_col:
+            col_letter = chr(ord("A") + header_to_col["AirTeamImages"])
+            ws.conditional_format(
+                f"{col_letter}2:{col_letter}{len(df_out)+1}",
+                {"type": "cell", "criteria": "==", "value": True, "format": green},
+            )
+
+            if "ATI_Link" in header_to_col:
+                link_col = header_to_col["ATI_Link"]
+                for r, link in enumerate(df_out["ATI_Link"], start=1):
+                    if link:
+                        ws.write_url(r, link_col, link, link_fmt, "View ATI")
+
+        if check_v1 and "V1Images" in header_to_col:
+            col_letter = chr(ord("A") + header_to_col["V1Images"])
+            ws.conditional_format(
+                f"{col_letter}2:{col_letter}{len(df_out)+1}",
+                {"type": "cell", "criteria": "==", "value": True, "format": green},
+            )
+
+            if "V1_Link" in header_to_col:
+                link_col = header_to_col["V1_Link"]
+                for r, link in enumerate(df_out["V1_Link"], start=1):
+                    if link:
+                        ws.write_url(r, link_col, link, link_fmt, "View V1")
+
+        # Optional: autosize-ish columns (simple)
+        for i, col_name in enumerate(df_out.columns):
+            max_len = max([len(str(col_name))] + [len(str(x)) for x in df_out[col_name].fillna("").astype(str).head(200)])
+            ws.set_column(i, i, min(max_len + 2, 45))
+
     buffer.seek(0)
-    st.download_button("Download Results as Excel", data=buffer, file_name="photo_availability.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+    st.download_button(
+        "Download Results as Excel",
+        data=buffer,
+        file_name="photo_availability.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
