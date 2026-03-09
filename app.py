@@ -55,7 +55,6 @@ def make_session() -> requests.Session:
     s.mount("http://", adapter)
     s.mount("https://", adapter)
 
-    # Browser-like headers help prevent “bot” responses / variant HTML
     s.headers.update(
         {
             "User-Agent": (
@@ -83,7 +82,7 @@ def get_session() -> requests.Session:
 # -----------------------------
 # Registration parsing
 # -----------------------------
-REG_PATTERN = re.compile(r"\b(?:[A-Z0-9]{1,3}-[A-Z0-9]{1,5}|N\d{1,5}[A-Z]?)\b")
+REG_PATTERN = re.compile(r"\b(?:[A-Z0-9]{1,3}-[A-Z0-9]{1,5}|N\d{1,5}[A-Z]{0,2})\b")
 
 
 def extract_regs_from_text(text: str) -> list[str]:
@@ -106,7 +105,6 @@ def extract_regs_from_df(df: pd.DataFrame, col) -> list[str]:
 # Search functions
 # -----------------------------
 def _polite_delay(min_ms: int, max_ms: int):
-    # helps if a site gets grumpy with parallel requests
     time.sleep(random.uniform(min_ms / 1000.0, max_ms / 1000.0))
 
 
@@ -124,42 +122,32 @@ def search_airteam(reg: str, timeout_s: int, min_delay_ms: int, max_delay_ms: in
     except Exception as e:
         return False, "", f"ATI request error: {e}"
 
-    # Soft-block indicators (common on VPS/AWS IP space)
-    block_markers = ["captcha", "cloudflare", "access denied", "forbidden", "blocked", "verify you are human"]
+    if r.status_code >= 400:
+        return False, "", f"ATI HTTP {r.status_code}"
+
+    block_markers = [
+        "captcha",
+        "cloudflare",
+        "access denied",
+        "forbidden",
+        "blocked",
+        "verify you are human",
+        "attention required",
+    ]
     if any(m in html.lower() for m in block_markers):
         return False, "", "ATI possible block page"
 
-    # More stable than CSS classes: presence of Image ID blocks generally indicates results exist
-    if re.search(r"Image ID:\s*\d+", html, re.IGNORECASE):
+    has_reg = reg.upper() in html.upper()
+    has_result_signal = bool(
+        re.search(r"Image ID:\s*\d+|View Large Photo|Loading Images", html, re.IGNORECASE)
+    )
+
+    if has_reg and has_result_signal:
         return True, url, ""
-    return False, "", ""
 
+    if re.search(r"Image ID:\s*\d+", html, re.IGNORECASE):
+        return True, url, "ATI matched Image ID but registration text not found"
 
-def search_v1(reg: str, timeout_s: int, min_delay_ms: int, max_delay_ms: int):
-    """
-    Returns: (found: bool, link: str, debug_flag: str)
-    """
-    _polite_delay(min_delay_ms, max_delay_ms)
-    s = get_session()
-    base = "https://www.v1images.com"
-    url = f"{base}/?s={quote_plus(reg)}&post_type=product&orderby=date-DESC"
-
-    try:
-        r = s.get(url, timeout=timeout_s, allow_redirects=True)
-        html = r.text or ""
-        final = r.url
-    except Exception as e:
-        return False, "", f"V1 request error: {e}"
-
-    block_markers = ["captcha", "cloudflare", "access denied", "forbidden", "blocked", "verify you are human"]
-    if any(m in html.lower() for m in block_markers):
-        return False, "", "V1 possible block page"
-
-    # Heuristic: redirect to product page or presence of product grid/figure
-    if final.rstrip("/") != url.rstrip("/") or re.search(r'post_type=product|woocommerce|product', html, re.IGNORECASE):
-        # Some searches keep you on same URL even when there are results; check for common product markup
-        if re.search(r'product|woocommerce|add to cart|post_type=product|class="product', html, re.IGNORECASE):
-            return True, final, ""
     return False, "", ""
 
 
@@ -195,14 +183,6 @@ with st.expander("Advanced Settings", expanded=False):
     min_delay_ms = st.slider("Minimum delay per request (ms)", 0, 1000, 50, step=25)
     max_delay_ms = st.slider("Maximum delay per request (ms)", 0, 2000, 200, step=25)
 
-st.markdown("**Select networks to check:**")
-check_ati = st.checkbox("AirTeamImages", value=True)
-check_v1 = st.checkbox("V1Images", value=True)
-
-if not (check_ati or check_v1):
-    st.warning("Select at least one network to check.")
-    st.stop()
-
 
 def load_regs() -> list[str]:
     uploaded.seek(0)
@@ -217,7 +197,6 @@ def load_regs() -> list[str]:
             st.stop()
         return extract_regs_from_df(df, col_input)
 
-    # Excel
     try:
         df = pd.read_excel(uploaded, sheet_name=sheet, dtype=str)
     except Exception as e:
@@ -243,25 +222,31 @@ if not regs:
 
 st.success(f"Loaded {len(regs)} registrations.")
 
+# -----------------------------
 # Optional quick debug
+# -----------------------------
 with st.expander("Debug tools", expanded=False):
     test_reg = st.text_input("Test registration", "A7-BHY")
-    if st.button("Test ATI/V1 from this server"):
-        cols = st.columns(2)
-        if check_ati:
+
+    if st.button("Test ATI from this server"):
+        s = get_session()
+        ati_url = f"https://www.airteamimages.com/search?q={quote_plus(test_reg)}&sort=id%2Cdesc"
+
+        try:
+            r = s.get(ati_url, timeout=timeout_s)
+            html_preview = (r.text or "")[:5000]
             found, link, dbg = search_airteam(test_reg, timeout_s, min_delay_ms, max_delay_ms)
-            with cols[0]:
-                st.subheader("AirTeamImages")
-                st.write("Found:", found)
-                st.write("Link:", link if link else "(none)")
-                st.write("Note:", dbg if dbg else "(none)")
-        if check_v1:
-            found2, link2, dbg2 = search_v1(test_reg, timeout_s, min_delay_ms, max_delay_ms)
-            with cols[1]:
-                st.subheader("V1Images")
-                st.write("Found:", found2)
-                st.write("Link:", link2 if link2 else "(none)")
-                st.write("Note:", dbg2 if dbg2 else "(none)")
+
+            st.subheader("AirTeamImages")
+            st.write("Found:", found)
+            st.write("Link:", link if link else "(none)")
+            st.write("Note:", dbg if dbg else "(none)")
+            st.write("HTTP status:", r.status_code)
+            st.write("Final URL:", r.url)
+            st.code(html_preview)
+        except Exception as e:
+            st.error(f"ATI debug request failed: {e}")
+
 
 # -----------------------------
 # Run checks
@@ -278,23 +263,14 @@ if st.button("Run Checks"):
         entry = {"Registration": reg}
         notes = []
 
-        if check_ati:
-            ok, link, dbg = search_airteam(reg, timeout_s, min_delay_ms, max_delay_ms)
-            entry["AirTeamImages"] = ok
-            entry["ATI_Link"] = link
-            if dbg:
-                notes.append(f"ATI: {dbg}")
-
-        if check_v1:
-            ok2, link2, dbg2 = search_v1(reg, timeout_s, min_delay_ms, max_delay_ms)
-            entry["V1Images"] = ok2
-            entry["V1_Link"] = link2
-            if dbg2:
-                notes.append(f"V1: {dbg2}")
+        ok, link, dbg = search_airteam(reg, timeout_s, min_delay_ms, max_delay_ms)
+        entry["AirTeamImages"] = ok
+        entry["ATI_Link"] = link
+        if dbg:
+            notes.append(f"ATI: {dbg}")
 
         return entry, (reg, "; ".join(notes) if notes else "")
 
-    # Use as_completed so progress updates smoothly
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = [executor.submit(check_entry, reg) for reg in regs]
         total = len(futures)
@@ -309,12 +285,7 @@ if st.button("Run Checks"):
             if i % 10 == 0 or i == total:
                 status.write(f"Checked {i}/{total}")
 
-    # Build output columns dynamically (prevents KeyError if only one network selected)
-    cols = ["Registration"]
-    if check_ati:
-        cols += ["AirTeamImages", "ATI_Link"]
-    if check_v1:
-        cols += ["V1Images", "V1_Link"]
+    cols = ["Registration", "AirTeamImages", "ATI_Link"]
 
     df_out = pd.DataFrame(results)
     df_out = df_out[cols].sort_values("Registration").reset_index(drop=True)
@@ -338,36 +309,19 @@ if st.button("Run Checks"):
         green = wb.add_format({"bg_color": "#C6EFCE"})
         link_fmt = wb.add_format({"font_color": "blue", "underline": True})
 
-        # Determine column indices by header
         header_to_col = {name: idx for idx, name in enumerate(df_out.columns)}
 
-        if check_ati and "AirTeamImages" in header_to_col:
-            col_letter = chr(ord("A") + header_to_col["AirTeamImages"])
-            ws.conditional_format(
-                f"{col_letter}2:{col_letter}{len(df_out)+1}",
-                {"type": "cell", "criteria": "==", "value": True, "format": green},
-            )
+        col_letter = chr(ord("A") + header_to_col["AirTeamImages"])
+        ws.conditional_format(
+            f"{col_letter}2:{col_letter}{len(df_out)+1}",
+            {"type": "cell", "criteria": "==", "value": True, "format": green},
+        )
 
-            if "ATI_Link" in header_to_col:
-                link_col = header_to_col["ATI_Link"]
-                for r, link in enumerate(df_out["ATI_Link"], start=1):
-                    if link:
-                        ws.write_url(r, link_col, link, link_fmt, "View ATI")
+        link_col = header_to_col["ATI_Link"]
+        for r, link in enumerate(df_out["ATI_Link"], start=1):
+            if link:
+                ws.write_url(r, link_col, link, link_fmt, "View ATI")
 
-        if check_v1 and "V1Images" in header_to_col:
-            col_letter = chr(ord("A") + header_to_col["V1Images"])
-            ws.conditional_format(
-                f"{col_letter}2:{col_letter}{len(df_out)+1}",
-                {"type": "cell", "criteria": "==", "value": True, "format": green},
-            )
-
-            if "V1_Link" in header_to_col:
-                link_col = header_to_col["V1_Link"]
-                for r, link in enumerate(df_out["V1_Link"], start=1):
-                    if link:
-                        ws.write_url(r, link_col, link, link_fmt, "View V1")
-
-        # Optional: autosize-ish columns (simple)
         for i, col_name in enumerate(df_out.columns):
             max_len = max([len(str(col_name))] + [len(str(x)) for x in df_out[col_name].fillna("").astype(str).head(200)])
             ws.set_column(i, i, min(max_len + 2, 45))
@@ -380,4 +334,3 @@ if st.button("Run Checks"):
         file_name="photo_availability.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
-
